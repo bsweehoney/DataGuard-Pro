@@ -1,12 +1,6 @@
-# DataGuard-Pro 🛡️
+# DataGuard-Pro 
 
 > Automated PII scanning, data quality validation, schema drift detection, and compliance reporting — built entirely in Python.
-
-[![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=flat&logo=python&logoColor=white)](https://python.org)
-[![Streamlit](https://img.shields.io/badge/Streamlit-1.x-FF4B4B?style=flat&logo=streamlit&logoColor=white)](https://streamlit.io)
-[![Great Expectations](https://img.shields.io/badge/Great_Expectations-1.x-FF6B35?style=flat)](https://greatexpectations.io)
-[![AWS Lambda](https://img.shields.io/badge/AWS-Lambda%20Ready-FF9900?style=flat&logo=amazonaws&logoColor=white)](https://aws.amazon.com/lambda)
-[![License](https://img.shields.io/badge/License-MIT-22C55E?style=flat)](LICENSE)
 
 ---
 
