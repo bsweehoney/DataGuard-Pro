@@ -1,0 +1,5 @@
+streamlit
+plotly
+pandas
+great_expectations
+reportlab
