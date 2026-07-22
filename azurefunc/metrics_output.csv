@@ -1,0 +1,2 @@
+timestamp,filename,trigger,rows,columns,health_score,grade,privacy_score,quality_score,completeness_score,high_pii,medium_pii,low_pii,quality_failed,duplicate_pct
+2026-07-22T03:22:54.090259,sample_customers.csv,http_manual,11,9,42,D — At risk,74,0,82,2,2,2,4,9.1

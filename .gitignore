@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.env
+local.settings.json
+*.pdf
+*.json
+.azure/
+venv/

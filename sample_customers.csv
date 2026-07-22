@@ -1,0 +1,12 @@
+customer_id,name,email,age,zip_code,revenue,serial_number,notes,signup_date
+1.0,Alice Johnson,alice@acme.com,28,30001,1200,372-88-3412,Preferred customer. SSN: 372-88-3412,2024-01-31
+2.0,Bob Smith,not-an-email,-3,30002,450,415-555-0199,Call on 415-555-0199 after 3pm,2024-02-29
+3.0,Carol White,carol@acme.com,34,XXXXX,-50,SN-00123,VIP — card on file 4111-1111-1111-1111,2024-03-31
+,Dave Brown,dave@acme.com,150,30004,890,SN-00124,Standard account,2024-04-30
+5.0,Eve Davis,eve@acme.com,22,30005,2100,SN-00125,Referred by Eve. DOB: 03/15/1985,2024-05-31
+6.0,Frank Miller,frank@acme.com,45,30006,300,SN-00126,Regular customer,2024-06-30
+7.0,Grace Wilson,grace@acme.com,31,30007,780,SN-00127,Premium tier,2024-07-31
+8.0,Henry Moore,henry@acme.com,52,30008,1500,SN-00128,Seasonal buyer,2024-08-31
+9.0,Iris Taylor,iris@acme.com,27,30009,620,SN-00129,New account,2024-09-30
+10.0,James Anderson,james@acme.com,38,30010,940,SN-00130,New account,2024-10-31
+10.0,James Anderson,james@acme.com,38,30010,940,SN-00130,New account,2024-10-31
