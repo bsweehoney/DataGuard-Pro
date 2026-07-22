@@ -1,39 +1,64 @@
 # DataGuard-Pro 
 
-> Automated PII scanning, data quality validation, schema drift detection, and compliance reporting — built entirely in Python.
+> An event-driven data governance platform implementing Medallion Architecture on Azure — automated PII scanning, data quality validation, schema drift detection, and Gold-layer analytics for small and medium enterprises.
+
+[![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=flat&logo=python&logoColor=white)](https://python.org)
+[![Azure Functions](https://img.shields.io/badge/Azure-Functions-0078D4?style=flat&logo=microsoftazure&logoColor=white)](https://azure.microsoft.com/en-us/products/functions)
+[![Streamlit](https://img.shields.io/badge/Streamlit-1.x-FF4B4B?style=flat&logo=streamlit&logoColor=white)](https://streamlit.io)
+[![Great Expectations](https://img.shields.io/badge/Great_Expectations-1.x-FF6B35?style=flat)](https://greatexpectations.io)
+[![License](https://img.shields.io/badge/License-MIT-22C55E?style=flat)](LICENSE)
+
+**Live API:** `https://dataguard-func-app.azurewebsites.net/api/dataguardscanner`
 
 ---
 
 ## Overview
 
-DataGuard-Pro is a data governance platform targeting small and medium enterprises (SMEs) that lack the budget for enterprise-grade compliance tooling. It scans CSV datasets in memory — detecting hidden PII, validating data quality, monitoring schema changes, and generating client-facing audit reports — without ever persisting a copy of the raw data.
+DataGuard-Pro is a production-grade data governance platform targeting SMEs that lack the budget for enterprise compliance tooling. It scans CSV datasets in memory — detecting hidden PII, validating data quality, monitoring schema changes, and generating audit reports — without ever persisting raw data.
 
-GDPR fines reach €20 million. CCPA fines are $750 per consumer per incident. Most SMEs have no tooling to detect the data exposure that triggers these fines. DataGuard-Pro fills that gap.
+GDPR fines reach €20 million. CCPA fines are $750 per consumer per incident. Most SMEs have no tooling to detect the data exposure that triggers these fines. DataGuard-Pro fills that gap at ~$0.001 per scan.
 
 ---
 
-## Architecture
+## Architecture — Medallion Pipeline
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    data_health_check.py                      │
-│                    (Backend Engine)                          │
-├──────────────┬──────────────┬──────────────┬────────────────┤
-│ PII Scanner  │Quality Suite │Schema Drift  │Industry Packs  │
-│ Regex +      │Great         │JSON baseline │E-commerce      │
-│ Context      │Expectations  │comparison +  │Finance         │
-│ Scoring      │v1.x ephemeral│CRITICAL col  │Healthcare      │
-│              │mode          │keyword alerts│                │
-└──────────────┴──────────────┴──────────────┴────────────────┘
-                              │
-              ┌───────────────┴────────────────┐
-              │                                │
-    ┌─────────▼─────────┐           ┌──────────▼──────────┐
-    │   dashboard.py    │           │  generate_report.py  │
-    │ Streamlit UI      │           │  ReportLab PDF       │
-    │ Remediation Engine│           │  3-page audit report │
-    │ Session State     │           │  Client deliverable  │
-    └───────────────────┘           └─────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                    EVENT-DRIVEN PIPELINE                         │
+│                                                                  │
+│  CSV Upload                                                      │
+│      │                                                           │
+│      ▼                                                           │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │           Azure Blob Storage (Bronze Layer)              │    │
+│  │                   incoming/                              │    │
+│  └─────────────────────────┬───────────────────────────────┘    │
+│                             │ Blob Trigger (automatic)           │
+│                             ▼                                    │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │              Azure Function (Scanner)                    │    │
+│  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐  │    │
+│  │  │   PII    │ │ Quality  │ │  Schema  │ │ Industry │  │    │
+│  │  │ Scanner  │ │   Suite  │ │  Drift   │ │  Packs   │  │    │
+│  │  └──────────┘ └──────────┘ └──────────┘ └──────────┘  │    │
+│  └──────────────────────┬──────────────────────────────────┘    │
+│                          │                                       │
+│           ┌──────────────┼──────────────┐                       │
+│           ▼              ▼              ▼                        │
+│       cleansed/       results/        metrics/                   │
+│      (Silver)         (Bronze+)       (Gold)                     │
+│    PII masked       Scan JSON      quality_metrics.csv           │
+│    Deduped CSV      results        Historical trends             │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+                             │
+                             ▼
+              ┌──────────────────────────────┐
+              │     Streamlit Dashboard       │
+              │  4 tabs · 6 analytics charts  │
+              │  Scan · Cloud · Analytics ·   │
+              │       How It Works            │
+              └──────────────────────────────┘
 ```
 
 ---
@@ -41,76 +66,77 @@ GDPR fines reach €20 million. CCPA fines are $750 per consumer per incident. M
 ## Features
 
 ### 1. Context-Aware PII Detection
-Detects 8 PII types using regex — SSN, email, phone, credit card, IP address, date of birth, passport, IBAN. The key differentiator: instead of flagging every pattern match, a confidence scoring function assigns each finding a risk level (HIGH / MEDIUM / LOW) based on column name semantics and surrounding cell text.
+Detects 6 PII types using regex with column-name context scoring. A match in a `serial_number` column gets 15% confidence (LOW — likely false positive). A match in a `notes` column next to "social security" gets 90% confidence (HIGH). This reduces actionable false positive alerts by **33%** while maintaining **100% recall** on genuine PII.
 
-- A match in a column named `serial_number` → 15% confidence → **LOW** (likely a false positive)
-- A match in a column named `identity` → 100% confidence → **HIGH**
-- A match in a `notes` column next to the word "social security" → 90% confidence → **HIGH**
+| Sensitivity | Detects |
+|-------------|---------|
+| `low` | SSN, Credit Card |
+| `medium` | + Phone, Date of Birth |
+| `high` | + Email, IP Address |
 
-This reduces actionable false positive alerts by ~33% while maintaining 100% recall on genuine PII instances.
+All matched values are partially masked before storage — `372-88-3412` → `XXX-XX-3412`.
 
-Three sensitivity presets: `low` (SSN + credit cards only), `medium` (adds phone + DOB), `high` (all 8 patterns).
+### 2. Automated Blob Trigger (Event-Driven)
+Drop a CSV into the `incoming/` container. Azure fires the Function automatically — no human action required. Results are saved to three destinations simultaneously:
+- `results/` — full scan JSON
+- `cleansed/` — PII-masked, deduplicated CSV (Silver layer)
+- `metrics/quality_metrics.csv` — appended row for Gold layer analytics
 
-### 2. Data Quality Validation (Great Expectations)
-Auto-generates a Great Expectations validation suite from column names and dtypes — no manual configuration required. Runs in ephemeral mode (in-memory, zero infrastructure), making it suitable for serverless deployment.
+### 3. Medallion Architecture (Bronze / Silver / Gold)
+```
+Bronze  →  incoming/     Raw CSV files as uploaded
+Silver  →  cleansed/     PII masked + exact duplicates removed
+Gold    →  metrics/      Aggregated quality_metrics.csv for trend analysis
+```
 
-Auto-detected rules include:
+Every scan appends 15 metrics columns to the Gold layer: timestamp, filename, health score, privacy/quality/completeness sub-scores, HIGH/MEDIUM/LOW PII counts, quality failures, and duplicate rate.
+
+### 4. Data Quality Validation (Great Expectations v1.x)
+Auto-generates a validation suite from column names — zero configuration required. Runs in ephemeral mode (no disk writes, serverless-compatible).
+
 - ID columns → `ExpectColumnValuesToNotBeNull`
-- Email columns → `ExpectColumnValuesToMatchRegex` (RFC 5322)
-- Numeric revenue/price columns → `ExpectColumnValuesToBeBetween(min=0)`
-- Age columns → `ExpectColumnValuesToBeBetween(min=0, max=120)`
-- Zip/postal columns → US ZIP regex
+- Email columns → RFC 5322 regex validation
+- Numeric revenue/price → non-negative check
+- Age columns → range 0–120
+- Zip codes → US ZIP format
 
-Custom rules can be added via a `config.json` file.
+### 5. Schema Drift Detection
+Compares incoming dataset structure against a saved JSON baseline. Classifies changes as CRITICAL (new column matches sensitive keywords: password, medical, salary, cvv, biometric) or WARNING (any other structural change). CRITICAL alerts surface at the top of both the dashboard and email notifications.
 
-### 3. Schema Drift Detection
-Serializes dataset schema (column names, dtypes, row count) to a JSON baseline. On subsequent scans, compares current schema against the baseline and classifies changes:
-
-- **CRITICAL alert** — new column name contains a sensitive keyword (`password`, `medical`, `salary`, `cvv`, `biometric`, etc.)
-- **WARNING** — any other column addition or type change
-- **INFO** — column removed since baseline
-
-Baseline can be saved to session memory (persists across Streamlit reruns via `st.session_state`) or downloaded as JSON for cross-session use.
-
-### 4. Industry Business Logic Packs
-Pluggable validation modules that enforce domain-specific invariants beyond generic schema checks:
+### 6. Industry Business Logic Packs
+Domain-specific cross-column validation beyond generic schema checks:
 
 | Pack | Checks |
 |------|--------|
-| **E-commerce** | Ship date after order date · prices ≥ 0 · quantities are positive integers · signup dates in the past |
-| **Finance** | Tax = configured rate × subtotal · total = subtotal + tax · no unexpected negative balances |
-| **Healthcare** | Patient age 0–130 · discharge date after admission · dosage values positive |
+| E-commerce | Ship date after order date · prices ≥ 0 · quantities positive integers · dates in past |
+| Finance | Tax = subtotal × rate · total = subtotal + tax · no negative balances |
+| Healthcare | Patient age 0–130 · discharge after admission · dosage positive |
 
-Failed pack checks apply a score penalty (up to −20 pts) on top of the base health score.
+Failed pack checks apply a score penalty (up to −20 pts).
 
-### 5. Remediation Engine
-Interactive panel inside the Streamlit dashboard:
-- Toggle PII masking (HIGH/MEDIUM confidence findings only)
+### 7. Remediation Engine
+Interactive panel in the Streamlit dashboard:
+- Toggle PII masking (HIGH/MEDIUM confidence only)
 - Toggle exact duplicate removal
-- Preview every intended transformation before executing
-- One-click execution: deduplicates then masks in-memory
-- Remediated dataset saved to `st.session_state` and unlocked as a download in the Export Engine
+- Preview every transformation before executing
+- One-click execution → sanitized CSV unlocked in Export Engine
 
-### 6. Data Health Score
-Composite 0–100 score across three weighted dimensions:
+### 8. Analytics Dashboard (Gold Layer)
+6 real-time charts reading from `metrics/quality_metrics.csv`:
+- Health score trend line with grade zones
+- PII exposure stacked bar (HIGH/MEDIUM/LOW per scan)
+- Quality score comparison bar
+- Duplicate rate area chart
+- Radar chart — Privacy/Quality/Completeness dimensions
+- Grade distribution donut
 
-```
-Overall = (Privacy × 0.38) + (Quality × 0.38) + (Completeness × 0.18) − pack_penalty
-```
+### 9. PDF Audit Report
+3-page branded report generated by ReportLab — cover with score ring, full PII findings table (masked values + confidence scores), quality check results, prioritised recommendations, next steps. Client-deliverable in under 2 minutes.
 
-| Score | Grade |
-|-------|-------|
-| 85–100 | A — Healthy |
-| 70–84 | B — Acceptable |
-| 55–69 | C — Needs attention |
-| 40–54 | D — At risk |
-| 0–39 | F — Critical |
-
-### 7. PDF Audit Report
-3-page branded report generated by ReportLab:
-- **Page 1** — Cover, overall score ring, dimension bars, key metric counts
-- **Page 2** — Full PII findings table (masked values + confidence scores) + quality check results
-- **Page 3** — Prioritised recommendations, next steps, contact footer
+### 10. Email Alerts
+Sends an HTML email alert via SendGrid (or SMTP fallback) when:
+- Health score drops below configurable threshold (default: 70)
+- HIGH confidence PII is detected
 
 ---
 
@@ -122,15 +148,19 @@ git clone https://github.com/bsweehoney/DataGuard-Pro.git
 cd DataGuard-Pro
 
 # Install dependencies
-pip install great_expectations pandas streamlit plotly reportlab
+pip install great_expectations pandas streamlit plotly reportlab azure-storage-blob
 
-# Run the CLI scanner (auto-generates sample data)
+# Copy environment template
+cp .env.example .env
+# Edit .env with your Azure credentials
+
+# Run CLI scanner (auto-generates sample data)
 python data_health_check.py
 
-# Launch the dashboard
+# Launch dashboard
 streamlit run dashboard.py
 
-# Generate a PDF audit report
+# Generate PDF audit report
 python data_health_check.py --file data.csv --output results.json
 python generate_report.py --json results.json --client "Client Name"
 ```
@@ -143,10 +173,10 @@ python generate_report.py --json results.json --client "Client Name"
 # Basic scan
 python data_health_check.py --file data.csv
 
-# High sensitivity + healthcare business logic pack
+# High sensitivity + healthcare pack
 python data_health_check.py --file patients.csv --sensitivity high --pack healthcare
 
-# Save baseline schema for drift detection
+# Save schema baseline for drift detection
 python data_health_check.py --file data.csv --save-schema
 
 # Compare against saved baseline
@@ -154,13 +184,26 @@ python data_health_check.py --file data.csv --schema baseline_schema.json
 
 # Export JSON for PDF generation
 python data_health_check.py --file data.csv --output scan_results.json
-
-# Generate PDF report
-python generate_report.py --json scan_results.json \
-  --client "Acme Corp" \
-  --agency "DataGuard Pro" \
-  --contact "hello@youragency.com"
 ```
+
+---
+
+## Live API
+
+The Azure Function accepts CSV files via HTTP POST:
+
+```bash
+# Health check
+curl https://dataguard-func-app.azurewebsites.net/api/dataguardscanner
+
+# Scan a CSV
+curl -X POST \
+  "https://dataguard-func-app.azurewebsites.net/api/dataguardscanner?filename=data.csv&sensitivity=high" \
+  --data-binary @data.csv \
+  -H "Content-Type: text/csv"
+```
+
+Response includes: health score, grade, PII findings (masked), quality check results, duplicates, saved blob paths, and Gold layer update confirmation.
 
 ---
 
@@ -168,65 +211,73 @@ python generate_report.py --json scan_results.json \
 
 ```
 DataGuard-Pro/
-├── data_health_check.py    # Core engine — PII scanner, GX quality suite,
-│                           # schema drift, industry packs, scoring
-├── dashboard.py            # Streamlit UI — scan controls, remediation engine,
-│                           # session state baseline, export engine
-├── generate_report.py      # ReportLab PDF generator — 3-page audit report
-├── sample_customers.csv    # Synthetic test dataset with deliberate issues
-└── .gitignore
+├── data_health_check.py      # Core engine — PII, quality, drift, industry packs
+├── dashboard.py              # Streamlit UI — 4 tabs, analytics, remediation
+├── generate_report.py        # ReportLab PDF — 3-page audit report
+├── sample_customers.csv      # Synthetic test dataset
+├── .env.example              # Environment variable template (copy to .env)
+├── .gitignore                # Protects credentials
+└── azurefunc/
+    ├── function_app.py       # Azure Function — HTTP + Blob triggers
+    ├── requirements.txt      # Function dependencies
+    └── host.json             # Function runtime config
+```
+
+---
+
+## Environment Variables
+
+Copy `.env.example` to `.env` and fill in your values:
+
+```
+AZURE_STORAGE_CONNECTION_STRING=your_connection_string
+AZURE_RESULTS_CONTAINER=results
+AZURE_INCOMING_CONTAINER=incoming
+AZURE_CLEANSED_CONTAINER=cleansed
+DEFAULT_SENSITIVITY=medium
+ALERT_SCORE_THRESHOLD=70
+ALERT_EMAIL_TO=your@email.com
+SENDGRID_API_KEY=optional_for_email_alerts
 ```
 
 ---
 
 ## Evaluation Results
 
-Against the included synthetic dataset (`sample_customers.csv`, 11 rows × 8 columns):
+Against the synthetic test dataset (11 rows × 9 columns):
 
 | Metric | Result |
 |--------|--------|
 | Overall health score | 72/100 (B — Acceptable) |
-| Score with healthcare pack | 66/100 (C — Needs attention) |
-| HIGH confidence PII found | 2 instances (SSN + DOB in notes column) |
-| False positives correctly downgraded | 2 instances (patterns in serial_number column → LOW 15%) |
+| With healthcare pack | 66/100 (C — Needs attention) |
+| HIGH PII found | 2 (SSN + DOB in notes column) |
+| False positives correctly downgraded | 2 (serial_number column → LOW 15%) |
 | False positive reduction vs naive scanner | 33% |
-| Quality failures detected | 5 (null ID, bad email, impossible ages, invalid zip, negative revenue) |
-| Exact duplicates | 1 row (9.1% of dataset) |
-| After remediation | 10 rows, PII masked, duplicates removed |
+| Quality failures | 5 detected |
+| Exact duplicates | 1 row (9.1%) |
+| After remediation | 10 rows · PII masked · duplicates removed |
 
 ---
 
 ## Technology Stack
 
-| Component | Technology | Reason |
-|-----------|-----------|--------|
-| Language | Python 3.11+ | Dominant data engineering language |
-| Quality validation | Great Expectations v1.x | Industry standard; ephemeral mode = no infrastructure |
-| PII detection | Custom regex + context scoring | Zero cold-start; no NLP model required |
-| Dashboard | Streamlit | Python-native; free community hosting |
-| PDF generation | ReportLab | Pure Python; precise layout control |
-| Visualisation | Plotly | Interactive gauge and bar charts |
-| Cloud target | AWS Lambda + S3 Events | Pay-per-execution; ~$0.01/month per client |
-
----
-
-## Cloud Deployment (AWS Lambda)
-
-The scanner is designed for serverless deployment:
-
-1. Client drops CSV into an S3 bucket
-2. S3 Event Notification triggers a Lambda function
-3. Lambda runs `data_health_check.py` against the file in memory
-4. Results are saved to DynamoDB / S3
-5. Dashboard reads results and updates the client's health score
-
-At Lambda pricing, a daily scan of a 1,000-row CSV costs under **$0.01/month** per client.
+| Component | Technology | Purpose |
+|-----------|-----------|---------|
+| Language | Python 3.11+ | Core engine |
+| Quality validation | Great Expectations v1.x | Ephemeral in-memory validation |
+| PII detection | Custom regex + context scoring | Zero cold-start, serverless-ready |
+| Cloud compute | Azure Functions | HTTP + Blob event triggers |
+| Storage | Azure Blob Storage | Bronze/Silver/Gold containers |
+| Dashboard | Streamlit | 4-tab SaaS UI |
+| Visualisation | Plotly | 6 analytics charts |
+| PDF generation | ReportLab | Client audit reports |
+| Email alerts | SendGrid / SMTP | Threshold-based notifications |
 
 ---
 
 ## Legal
 
-All data is processed in memory only. No copy of any scanned dataset is written to disk or transmitted. Suitable for deployment under a Data Processing Agreement (DPA) as defined by GDPR Article 28.
+All data is processed in memory only. No raw data is written to disk or transmitted beyond the scan pipeline. The `cleansed/` output contains only masked values — original PII is never stored. Suitable for deployment under a Data Processing Agreement (DPA) as defined by GDPR Article 28.
 
 ---
 
