@@ -2,11 +2,6 @@
 
 > An event-driven data governance platform implementing Medallion Architecture on Azure — automated PII scanning, data quality validation, schema drift detection, and Gold-layer analytics for small and medium enterprises.
 
-[![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=flat&logo=python&logoColor=white)](https://python.org)
-[![Azure Functions](https://img.shields.io/badge/Azure-Functions-0078D4?style=flat&logo=microsoftazure&logoColor=white)](https://azure.microsoft.com/en-us/products/functions)
-[![Streamlit](https://img.shields.io/badge/Streamlit-1.x-FF4B4B?style=flat&logo=streamlit&logoColor=white)](https://streamlit.io)
-[![Great Expectations](https://img.shields.io/badge/Great_Expectations-1.x-FF6B35?style=flat)](https://greatexpectations.io)
-[![License](https://img.shields.io/badge/License-MIT-22C55E?style=flat)](LICENSE)
 
 **Live API:** `https://dataguard-func-app.azurewebsites.net/api/dataguardscanner`
 
