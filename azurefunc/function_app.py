@@ -108,19 +108,84 @@ def calculate_score(pii, quality, dupes, rows):
             "pii_medium":sum(1 for f in pii if f["risk"]=="MEDIUM"),
             "pii_low":sum(1 for f in pii if f["risk"]=="LOW")}
 
-def remediate(df, pii_findings, mask=True, dedup=True):
+def remediate(df, pii_findings, mask=True, dedup=True, encrypt_high_risk=False):
+    """
+    Remediates a DataFrame. Three independent operations:
+      - dedup:             drops exact duplicate rows
+      - mask:               replaces PII with partial masks (XXX-XX-1234 style)
+      - encrypt_high_risk:  replaces HIGH-confidence PII with AES-encrypted tokens
+                            instead of masking — recoverable with the encryption key,
+                            unlike masking which is irreversible.
+
+    mask and encrypt_high_risk are mutually applied per-finding: encryption takes
+    priority for HIGH risk findings when both are enabled, since it's reversible
+    and provides an audit trail; MEDIUM/LOW risk findings still get masked.
+    """
     clean = df.copy()
-    if dedup: clean = clean.drop_duplicates().reset_index(drop=True)
-    if mask:
+    if dedup:
+        clean = clean.drop_duplicates().reset_index(drop=True)
+
+    if mask or encrypt_high_risk:
         clean = clean.astype(str)
+        cipher = get_cipher() if encrypt_high_risk else None
+
         for h in pii_findings:
-            if h["risk"] in ("HIGH","MEDIUM"):
-                try:
-                    ci = clean.columns.get_loc(h["column"]); ri = h["row"]; rv = h.get("raw_value","")
-                    if ri < len(clean) and rv:
-                        clean.iloc[ri,ci] = str(clean.iloc[ri,ci]).replace(rv, h["masked"])
-                except: pass
+            if h["risk"] not in ("HIGH", "MEDIUM"):
+                continue
+            try:
+                ci = clean.columns.get_loc(h["column"])
+                ri = h["row"]
+                rv = h.get("raw_value", "")
+                if ri >= len(clean) or not rv:
+                    continue
+
+                if encrypt_high_risk and h["risk"] == "HIGH" and cipher:
+                    # Full recoverable token goes into the actual output data.
+                    # (A truncated "ENC[...]" preview is used only in reports/dashboards.)
+                    replacement = encrypt_value_full(cipher, rv)
+                else:
+                    replacement = h["masked"]
+
+                current = str(clean.iloc[ri, ci])
+                clean.iloc[ri, ci] = current.replace(rv, replacement)
+            except Exception:
+                pass
+
     return clean
+
+
+# ── PII Encryption Engine (AES-128-CBC + HMAC via Fernet) ────────────────────
+
+def get_cipher():
+    """
+    Loads the Fernet cipher used to encrypt HIGH-risk PII values.
+    The key is read from an environment variable (PII_ENCRYPTION_KEY) —
+    in production this should come from Azure Key Vault rather than an
+    app setting, but env var is used here to avoid additional Azure
+    provisioning dependencies.
+    """
+    from cryptography.fernet import Fernet
+    key = os.environ.get("PII_ENCRYPTION_KEY")
+    if not key:
+        raise ValueError(
+            "PII_ENCRYPTION_KEY not set. Generate one with: "
+            "python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+        )
+    return Fernet(key.encode() if isinstance(key, str) else key)
+
+def encrypt_value(cipher, raw_value: str) -> str:
+    """Encrypts a raw PII value, returning a short recognizable token."""
+    token = cipher.encrypt(raw_value.encode()).decode()
+    # Prefix so encrypted values are visually distinguishable from masked ones
+    return f"ENC[{token[:24]}...]"
+
+def encrypt_value_full(cipher, raw_value: str) -> str:
+    """Encrypts a raw PII value, returning the FULL recoverable token (for storage)."""
+    return cipher.encrypt(raw_value.encode()).decode()
+
+def decrypt_value(cipher, token: str) -> str:
+    """Decrypts a full Fernet token back to the original PII value. Requires the key."""
+    return cipher.decrypt(token.encode()).decode()
 
 def get_blob_svc():
     from azure.storage.blob import BlobServiceClient
@@ -134,13 +199,83 @@ def save_json(result, filename):
         return name
     except Exception as e: logging.error(f"save_json failed: {e}"); return ""
 
-def save_clean(clean_df, filename):
+def save_clean(clean_df, filename, output_format="csv"):
+    """Saves cleansed data in the client's requested output format."""
     try:
-        svc = get_blob_svc(); name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_clean_{filename}"
+        svc = get_blob_svc()
+        ext = output_extension(output_format)
+        base = filename.rsplit(".", 1)[0] if "." in filename else filename
+        name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_clean_{base}.{ext}"
+        data_bytes = write_any_format(clean_df, output_format)
         svc.get_blob_client(container=os.environ.get("AZURE_CLEANSED_CONTAINER","cleansed"), blob=name)\
-           .upload_blob(clean_df.to_csv(index=False), overwrite=True)
+           .upload_blob(data_bytes, overwrite=True)
         return name
     except Exception as e: logging.error(f"save_clean failed: {e}"); return ""
+
+# ── Universal file format support ────────────────────────────────────────────
+
+def detect_format(filename: str) -> str:
+    """Detects file format from extension."""
+    ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else "csv"
+    return {"csv": "csv", "parquet": "parquet", "json": "json",
+            "xlsx": "excel", "xls": "excel"}.get(ext, "csv")
+
+def read_any_format(raw_bytes: bytes, filename: str) -> pd.DataFrame:
+    """
+    Reads a file into a DataFrame regardless of format.
+    Supports: CSV, Parquet, JSON, Excel.
+    This is what makes the pipeline accept ANY incoming format.
+    """
+    fmt = detect_format(filename)
+    buf = io.BytesIO(raw_bytes)
+
+    if fmt == "parquet":
+        df = pd.read_parquet(buf, engine="pyarrow")
+    elif fmt == "json":
+        df = pd.read_json(buf)
+    elif fmt == "excel":
+        df = pd.read_excel(buf)
+    else:  # csv (default)
+        df = pd.read_csv(io.StringIO(raw_bytes.decode("utf-8")), dtype=str, low_memory=False)
+
+    # Type inference for numeric-looking columns
+    for col in df.columns:
+        try: df[col] = pd.to_numeric(df[col])
+        except Exception: pass
+
+    return df, fmt
+
+def write_any_format(df: pd.DataFrame, output_format: str) -> bytes:
+    """
+    Serializes a DataFrame to bytes in the requested output format.
+    This is what lets the CLIENT choose their preferred download format —
+    independent of what format they originally uploaded.
+    """
+    buf = io.BytesIO()
+    output_format = (output_format or "csv").lower()
+
+    if output_format == "parquet":
+        df.to_parquet(buf, index=False, engine="pyarrow")
+    elif output_format == "json":
+        buf.write(df.to_json(orient="records", indent=2).encode("utf-8"))
+    elif output_format == "excel":
+        df.to_excel(buf, index=False, engine="openpyxl")
+    else:  # csv (default)
+        buf.write(df.to_csv(index=False).encode("utf-8"))
+
+    buf.seek(0)
+    return buf.read()
+
+def output_extension(output_format: str) -> str:
+    return {"parquet": "parquet", "json": "json", "excel": "xlsx"}.get(
+        (output_format or "csv").lower(), "csv")
+
+def output_content_type(output_format: str) -> str:
+    return {
+        "parquet": "application/octet-stream",
+        "json": "application/json",
+        "excel": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    }.get((output_format or "csv").lower(), "text/csv")
 
 def update_metrics(result):
     """Gold layer — appends one row to metrics/quality_metrics.csv after every scan."""
@@ -242,50 +377,165 @@ def run_scan(df, filename, sensitivity="medium"):
             "pii_by_risk":{"HIGH":scores["pii_high"],"MEDIUM":scores["pii_medium"],"LOW":scores["pii_low"]},
             "pii_findings":pii,"quality":quality,"duplicates":dupes}
 
-# ── BLOB TRIGGER — fully automated ───────────────────────────────────────────
+# ── BLOB TRIGGER — fully automated, accepts ANY file format ─────────────────
 @app.blob_trigger(arg_name="myblob", path="incoming/{name}", connection="AzureWebJobsStorage")
 def BlobTriggerScanner(myblob: func.InputStream):
     filename = myblob.name.split("/")[-1]
     logging.info(f"Blob trigger: {filename} ({myblob.length} bytes)")
-    if not filename.lower().endswith(".csv"): return
+
+    supported_exts = (".csv", ".parquet", ".json", ".xlsx", ".xls")
+    if not filename.lower().endswith(supported_exts):
+        logging.info(f"Skipping unsupported file type: {filename}")
+        return
+
     try:
-        df = pd.read_csv(io.BytesIO(myblob.read()), dtype=str, low_memory=False)
-        for col in df.columns:
-            try: df[col] = pd.to_numeric(df[col])
-            except: pass
-        sensitivity = os.environ.get("DEFAULT_SENSITIVITY","medium")
-        result = run_scan(df, filename, sensitivity); result["trigger"] = "blob_automatic"
-        result["saved_to_blob"]  = save_json(result, filename)
-        result["cleansed_blob"]  = save_clean(remediate(df, result["pii_findings"]), filename)
+        raw_bytes = myblob.read()
+        df, detected_format = read_any_format(raw_bytes, filename)
+        logging.info(f"Detected input format: {detected_format}")
+
+        sensitivity = os.environ.get("DEFAULT_SENSITIVITY", "medium")
+        output_format = os.environ.get("DEFAULT_OUTPUT_FORMAT", detected_format)
+        encrypt_high_risk = os.environ.get("ENCRYPT_HIGH_RISK_PII", "false").lower() == "true"
+
+        result = run_scan(df, filename, sensitivity)
+        result["trigger"] = "blob_automatic"
+        result["input_format"] = detected_format
+        result["output_format"] = output_format
+
+        clean_df = remediate(df, result["pii_findings"], mask=True, dedup=True,
+                             encrypt_high_risk=encrypt_high_risk)
+        result["saved_to_blob"] = save_json(result, filename)
+        result["cleansed_blob"] = save_clean(clean_df, filename, output_format)
+        result["protection_status"] = {
+            "encryption_enabled": encrypt_high_risk,
+            "high_risk_pii_protected": result["scores"]["pii_high"] if encrypt_high_risk else 0,
+            "high_risk_pii_masked_only": 0 if encrypt_high_risk else result["scores"]["pii_high"],
+        }
+
         if should_alert(result["scores"]):
             send_alert(filename, result["scores"], result["pii_findings"], result["quality"], result["duplicates"])
-        # Gold layer — append metrics row
-        update_metrics(result)
-        logging.info(f"Blob scan done: {filename} score={result['scores']['overall']}/100")
-    except Exception as e: logging.error(f"Blob trigger error: {e}")
 
-# ── HTTP TRIGGER — manual + dashboard ────────────────────────────────────────
+        update_metrics(result)
+        logging.info(f"Blob scan done: {filename} ({detected_format}→{output_format}) score={result['scores']['overall']}/100"
+                    f" encrypt={encrypt_high_risk}")
+    except Exception as e:
+        logging.error(f"Blob trigger error: {e}")
+
+# ── HTTP TRIGGER — manual + dashboard, accepts ANY format, client chooses output ──
 @app.route(route="DataGuardScanner", methods=["POST","GET"])
 def DataGuardScanner(req: func.HttpRequest) -> func.HttpResponse:
     if req.method == "GET":
-        return func.HttpResponse(json.dumps({"status":"online","service":"DataGuard-Pro","version":"v3.0",
-            "triggers":["HTTP","Blob auto on incoming/ upload"]}), mimetype="application/json", status_code=200)
+        return func.HttpResponse(json.dumps({
+            "status": "online", "service": "DataGuard-Pro", "version": "v3.0",
+            "triggers": ["HTTP", "Blob auto on incoming/ upload"],
+            "supported_input_formats": ["csv", "parquet", "json", "excel"],
+            "supported_output_formats": ["csv", "parquet", "json", "excel"],
+        }), mimetype="application/json", status_code=200)
+
     try:
-        sensitivity = req.params.get("sensitivity","medium"); filename = req.params.get("filename","upload.csv")
+        sensitivity    = req.params.get("sensitivity", "medium")
+        filename       = req.params.get("filename", "upload.csv")
+        output_format  = req.params.get("output_format")  # client's choice — optional
+        encrypt_param  = req.params.get("encrypt", "false").lower() == "true"
+
         body = req.get_body()
-        if not body: return func.HttpResponse(json.dumps({"error":"No CSV in body"}), mimetype="application/json", status_code=400)
-        df = pd.read_csv(io.StringIO(body.decode("utf-8")), dtype=str, low_memory=False)
-        for col in df.columns:
-            try: df[col] = pd.to_numeric(df[col])
-            except: pass
-        result = run_scan(df, filename, sensitivity); result["trigger"] = "http_manual"
+        if not body:
+            return func.HttpResponse(json.dumps({"error": "No file data in request body"}),
+                                     mimetype="application/json", status_code=400)
+
+        df, detected_format = read_any_format(body, filename)
+
+        if not output_format:
+            output_format = detected_format
+
+        result = run_scan(df, filename, sensitivity)
+        result["trigger"] = "http_manual"
+        result["input_format"] = detected_format
+        result["output_format"] = output_format
+
+        clean_df = remediate(df, result["pii_findings"], mask=True, dedup=True,
+                             encrypt_high_risk=encrypt_param)
         result["saved_to_blob"] = save_json(result, filename)
-        result["cleansed_blob"] = save_clean(remediate(df, result["pii_findings"]), filename)
+        result["cleansed_blob"] = save_clean(clean_df, filename, output_format)
+        result["protection_status"] = {
+            "encryption_enabled": encrypt_param,
+            "high_risk_pii_protected": result["scores"]["pii_high"] if encrypt_param else 0,
+            "high_risk_pii_masked_only": 0 if encrypt_param else result["scores"]["pii_high"],
+        }
+
         if should_alert(result["scores"]):
             send_alert(filename, result["scores"], result["pii_findings"], result["quality"], result["duplicates"])
-        # Gold layer — append metrics row
+
         update_metrics(result)
-        return func.HttpResponse(json.dumps(result,indent=2,default=str), mimetype="application/json", status_code=200)
+        return func.HttpResponse(json.dumps(result, indent=2, default=str),
+                                 mimetype="application/json", status_code=200)
     except Exception as e:
         logging.error(f"HTTP error: {e}")
-        return func.HttpResponse(json.dumps({"error":str(e)}), mimetype="application/json", status_code=500)
+        return func.HttpResponse(json.dumps({"error": str(e)}), mimetype="application/json", status_code=500)
+
+
+# ── NEW ENDPOINT — download the cleansed file directly in requested format ──
+@app.route(route="DownloadCleansed", methods=["GET"])
+def DownloadCleansed(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    Lets the client download the cleansed version of a file in ANY format
+    they choose — independent of the format they originally uploaded.
+
+    GET /api/DownloadCleansed?blob_name=<cleansed_blob_name>&format=parquet
+    """
+    try:
+        blob_name = req.params.get("blob_name")
+        want_format = req.params.get("format", "csv")
+
+        if not blob_name:
+            return func.HttpResponse(json.dumps({"error": "blob_name parameter required"}),
+                                     mimetype="application/json", status_code=400)
+
+        svc = get_blob_svc()
+        container = os.environ.get("AZURE_CLEANSED_CONTAINER", "cleansed")
+        blob_client = svc.get_blob_client(container=container, blob=blob_name)
+        raw = blob_client.download_blob().readall()
+
+        # Read whatever format is currently stored, then re-serialize to what client wants
+        df, _ = read_any_format(raw, blob_name)
+        output_bytes = write_any_format(df, want_format)
+
+        return func.HttpResponse(
+            output_bytes,
+            mimetype=output_content_type(want_format),
+            status_code=200,
+            headers={"Content-Disposition": f"attachment; filename=cleansed.{output_extension(want_format)}"},
+        )
+    except Exception as e:
+        logging.error(f"Download error: {e}")
+        return func.HttpResponse(json.dumps({"error": str(e)}), mimetype="application/json", status_code=500)
+
+
+# ── NEW ENDPOINT — decrypt a single value (requires the encryption key) ──────
+@app.route(route="DecryptValue", methods=["POST"])
+def DecryptValue(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    Authorized recovery of an encrypted HIGH-risk PII value.
+    Requires PII_ENCRYPTION_KEY to be set on the Function App — anyone without
+    that key (e.g. someone who only has read access to Blob Storage) cannot
+    recover the original value, unlike simple masking which is one-way.
+
+    POST body: {"encrypted_value": "gAAAAAB..."}
+    """
+    try:
+        body = json.loads(req.get_body().decode("utf-8"))
+        encrypted_value = body.get("encrypted_value", "")
+        if not encrypted_value:
+            return func.HttpResponse(json.dumps({"error": "encrypted_value required in JSON body"}),
+                                     mimetype="application/json", status_code=400)
+
+        cipher = get_cipher()
+        original = decrypt_value(cipher, encrypted_value)
+
+        return func.HttpResponse(
+            json.dumps({"decrypted_value": original}),
+            mimetype="application/json", status_code=200,
+        )
+    except Exception as e:
+        logging.error(f"Decrypt error: {e}")
+        return func.HttpResponse(json.dumps({"error": str(e)}), mimetype="application/json", status_code=500)
