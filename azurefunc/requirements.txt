@@ -1,7 +1,10 @@
-# Uncomment to enable Azure Monitor OpenTelemetry
-# Ref: aka.ms/functions-azure-monitor-python 
-# azure-monitor-opentelemetry 
-
+$reqs = @"
 azure-functions
 azure-storage-blob
 pandas
+pyarrow
+openpyxl
+cryptography
+"@
+Set-Content -Path "requirements.txt" -Value $reqs -Encoding UTF8
+Get-Content requirements.txt
