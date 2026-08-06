@@ -1,10 +1,6 @@
-$reqs = @"
 azure-functions
 azure-storage-blob
 pandas
 pyarrow
 openpyxl
 cryptography
-"@
-Set-Content -Path "requirements.txt" -Value $reqs -Encoding UTF8
-Get-Content requirements.txt
